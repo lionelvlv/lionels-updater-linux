@@ -877,11 +877,15 @@ def main():
         launcher = pick_launcher()
         target = env('LIONEL_UPDATER_TARGET') or ''
         mode = env('LIONEL_UPDATER_MODE') or ('update' if target or dropped else '')
+        potato_pick = False   # potato mode picked: the update runs even when it is the latest (potato_mode() asks)
         if mode not in ('update', 'fresh'):
             say('\nWhat would you like to do?')
-            mode = ['update', 'fresh'][choose('Type 1 or 2 and press Enter', [
+            pick = choose('Type 1, 2 or 3 and press Enter', [
                 f'Update the ATM10 you already have in {NAMES[launcher]}',
-                f'Install the whole pack fresh, as a new {NAMES[launcher]} instance (about 2.7 GB to download)'], 1) - 1]
+                f'Install the whole pack fresh, as a new {NAMES[launcher]} instance (about 2.7 GB to download)',
+                'Potato mode on or off, for weak PCs (also gets the latest update, if there is one)'], 1)
+            mode = 'fresh' if pick == 2 else 'update'
+            potato_pick = pick == 3
 
         # Where the downloads go: the temporary folder, or the one the player chose last time when that was too full.
         base_file = os.path.join(STATE, 'temp-folder.txt')
@@ -927,9 +931,9 @@ def main():
                 if latest and in_pack == latest:
                     say(f'\nThe whole pack already has the latest update ({latest}): nothing more to download.')
                     src = None
-            elif latest and have == latest:
-                answer = ask('\nYou already have the latest update. Press Enter to close, or type R and Enter to install it again: ')
-                if not answer or answer.strip().lower() != 'r':
+            elif latest and have == latest and not potato_pick:
+                answer = ask('\nYou already have the latest update. Press Enter to close, type P and Enter for potato mode on or off, or R to install it again: ')
+                if not answer or answer.strip().lower() not in ('r', 'p'):
                     return 0
             if src and FILES_URL and not env('LIONEL_UPDATER_FORCE_ZIP'):
                 os.makedirs(src, exist_ok=True)
