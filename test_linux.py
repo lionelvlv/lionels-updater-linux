@@ -149,8 +149,13 @@ check('instance.json memory and arguments', '"maximumMemory": 16384' in ij and '
 check('LAUNCH-ARGUMENTS.txt written', '-Xmx16G' in read(f'{atl}/LAUNCH-ARGUMENTS.txt'))
 check('no temporary files left', not os.listdir(os.path.join(root, 'tmp')))
 
-# 2. Nothing new: no download, Enter closes
-rc, out = run('\n\n\n')
+# 2. Nothing new: potato mode never answered (2026-10-22), then that question instead of "nothing to do"; once
+# answered, no download, Enter closes. Potato mode is offered in the menu now that an ATM10 is known.
+rc, out = run('1\n\n\n\n\n')
+check('latest, potato never answered: the update runs for its question\n' + out, rc == 0 and 'One new question first' in out
+      and '3) Potato mode' in out)
+write(os.path.join(home, '.config/lionels-updater/potato-decided.txt'), 'off\n')
+rc, out = run('1\n\n\n')
 check('already latest is noticed\n' + out, rc == 0 and 'You already have the latest update' in out and 'Downloading the latest' not in out)
 
 # 3. A newer update without gone-later.jar: removed through the installed list; optional mod switched off
@@ -250,6 +255,24 @@ write(f'{atl}/mods/cc-tweaked-3.0.jar', 'damaged')
 rc, out = run('r\n\n\n\n', r2_env)
 check('per-file: R again repairs a damaged file only\n' + out, rc == 0 and 'Downloading 1 file(s)' in out
       and zipfile.is_zipfile(f'{atl}/mods/cc-tweaked-3.0.jar'))
+
+# 10. Fresh install into ATLauncher (2026-10-22): potato asked before the download; the instance written by the
+# updater from atlauncher-instance.json (no import), then updated; the sign-in steps at the end.
+mrpack = os.path.join(web, 'full.mrpack')
+with zipfile.ZipFile(mrpack, 'w') as z:
+    z.writestr('modrinth.index.json', '{"formatVersion":1,"game":"minecraft","versionId":"t","name":"x","files":[],'
+                                      '"dependencies":{"minecraft":"1.21.1","neoforge":"21.1.249"}}')
+    z.writestr('overrides/config/bcc-common.toml', 'modpackName = "All the Mods 10"\nmodpackVersion = "8.1"\n')
+    z.writestr('overrides/mods/base-mod.jar', 'base')
+rc, out = run('\n' * 12, {'LIONEL_UPDATER_LAUNCHER': 'ATLauncher', 'LIONEL_UPDATER_MODE': 'fresh', 'LIONEL_UPDATER_POTATO': 'N',
+                          'LIONEL_UPDATER_FULL_URL': 'file://' + mrpack, 'LIONEL_UPDATER_ZIP_URL': 'file://' + zip9})
+made = os.path.join(home, '.local/share/atlauncher/instances/LionelsATM10')
+check('fresh ATLauncher exits 0\n' + out, rc == 0 and 'Now import it' not in out)
+check('fresh ATLauncher: instance written and updated', os.path.isfile(f'{made}/mods/base-mod.jar')
+      and os.path.isfile(f'{made}/mods/cc-tweaked-3.0.jar') and '"name": "Lionel\'s ATM10"' in read(f'{made}/instance.json')
+      and '__UUID__' not in read(f'{made}/instance.json'))
+check('fresh: potato asked before the download, sign-in steps at the end', 0 <= out.find('Potato mode, for weak')
+      < out.find('Downloading the whole pack') and out.find('Login with Microsoft') > out.find('What to do now'))
 
 shutil.rmtree(root)
 print(f'{passed} passed, {failed} failed')

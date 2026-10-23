@@ -11,7 +11,7 @@
 #   - no update check at each start yet (12b): lionel-check.jar starts the Windows .bat.
 # Test-only switches: the LIONEL_UPDATER_* names of test.ps1 (TARGET, LAUNCHER, MODE, ZIP_URL, VERSION_URL, FULL_URL,
 # JAVA_URL, FILES_URL, MEMORY, OPTIONAL, POTATO, RAM_GB, FREE_MB, NO_DRIVE_SCAN, NO_CLIPBOARD, NO_START, ATL_OPEN, IMPORT_TO).
-import fnmatch, hashlib, os, platform, re, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request, zipfile
+import fnmatch, hashlib, json, os, platform, re, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid, zipfile
 
 MARK = "# Lionel's Additions updater for Linux: the logic."   # the .sh checks a downloaded copy for this line
 DRIVE_ID = '1czcjd-xR4lmtCPN5fUlQ1XYYMoG7Z7Oo'                # the update zip (the .bat's DRIVE_ID)
@@ -335,6 +335,12 @@ def modrinth_dirs():
             os.path.join(FLATPAK, 'com.modrinth.ModrinthApp', 'data', 'ModrinthApp')]
 
 
+def atl_homes():
+    return (os.path.join(DATA, 'atlauncher'), os.path.join(DATA, 'ATLauncher'), os.path.join(HOME, '.atlauncher'),
+            os.path.join(HOME, 'ATLauncher'), os.path.join(HOME, 'Games', 'ATLauncher'),
+            os.path.join(HOME, 'Downloads', 'ATLauncher'), os.path.join(FLATPAK, 'com.atlauncher.ATLauncher', 'data'))
+
+
 def find_packs():
     """ATM10 instances in the usual launcher folders, Flatpak ones too. The Modrinth app may keep its profiles anywhere,
     and that folder is only written in its app.db, so paths are read out of that file's bytes (as update.ps1 does)."""
@@ -357,9 +363,7 @@ def find_packs():
                         roots.append((os.path.join(p, 'profiles'), 'Modrinth'))
                         break
                     p = os.path.dirname(p)
-    for a in (os.path.join(DATA, 'atlauncher'), os.path.join(DATA, 'ATLauncher'), os.path.join(HOME, '.atlauncher'),
-              os.path.join(HOME, 'ATLauncher'), os.path.join(HOME, 'Games', 'ATLauncher'),
-              os.path.join(HOME, 'Downloads', 'ATLauncher'), os.path.join(FLATPAK, 'com.atlauncher.ATLauncher', 'data')):
+    for a in atl_homes():
         roots.append((os.path.join(a, 'instances'), 'ATLauncher'))
     for p in (os.path.join(DATA, 'PrismLauncher'), os.path.join(DATA, 'multimc'), os.path.join(HOME, '.local', 'share', 'polymc'),
               os.path.join(FLATPAK, 'org.prismlauncher.PrismLauncher', 'data', 'PrismLauncher')):
@@ -455,9 +459,77 @@ def sign_in_steps(launcher):
         say('  Top right "Accounts" > "Manage accounts" > "Add Microsoft", sign in with the account that owns Minecraft.')
 
 
+ATL_MADE = ''   # the name of the ATLauncher instance install_atl_instance() wrote, or ''
+
+
+def install_atl_instance(pack, work):
+    """ATLauncher, the import done for the player (2026-10-22; update.ps1's Install-AtlInstance has the why): the pack's
+    files unpacked into a new folder in its instances, atlauncher-instance.json (make_atl_template.py) beside them.
+    '' when it cannot (no ATLauncher folder or template, another Minecraft or NeoForge version, ATLauncher left open)."""
+    global ATL_MADE
+    home = next((h for h in atl_homes() if os.path.isdir(os.path.join(h, 'instances')) or os.path.isdir(os.path.join(h, 'configs'))), '')
+    template = os.path.join(work, 'atlauncher-instance.json')
+    if not home or not download(f'{GITHUB}/atlauncher-instance.json', template, 'ATLauncher instance'):
+        return ''
+    t = json.loads(read_text(template))
+    with zipfile.ZipFile(pack) as z:
+        names = {(i.filename[2:] if i.filename.startswith('./') else i.filename): i for i in z.infolist()}
+        if 'modrinth.index.json' not in names:
+            return ''
+        index = json.loads(z.read(names['modrinth.index.json']))
+        deps = index.get('dependencies', {})
+        if index.get('files') or deps.get('minecraft') != t['id'] or deps.get('neoforge') != t['launcher']['loaderVersion']['version']:
+            say('\n(This pack is for another Minecraft or NeoForge version than the updater knows, so ATLauncher imports it.)', '33')
+            return ''
+        # ATLauncher reads its instances when it starts: closed, it sees the new one next start.
+        for _ in range(3):
+            if not launcher_running('ATLauncher'):
+                break
+            say('\nATLauncher is open. Close it completely, then press Enter here: the updater puts the pack in it as a new instance.', '33')
+            if ask('  ') is None:
+                break
+        if launcher_running('ATLauncher'):
+            say('\nATLauncher stayed open, so the pack is imported by hand instead.', '33')
+            return ''
+        n = 1
+        while True:
+            name = "Lionel's ATM10" + (f' ({n})' if n > 1 else '')
+            dest = os.path.join(home, 'instances', 'LionelsATM10' + (f'-{n}' if n > 1 else ''))
+            if not os.path.exists(dest):
+                break
+            n += 1
+        section(f'Installing into ATLauncher as "{name}"')
+        # overrides/ first, then client-overrides/ over it (the Modrinth pack format)
+        files = sorted(((k, i) for k, i in names.items() if re.match(r'(client-)?overrides/', k) and not i.is_dir()),
+                       key=lambda f: f[0].startswith('client-'))
+        total, done = sum(i.file_size for _, i in files) + 1, 0
+        root = os.path.realpath(dest)
+        try:
+            for k, i in files:
+                to = os.path.realpath(os.path.join(root, re.sub(r'^(client-)?overrides/', '', k)))
+                if not to.startswith(root + os.sep):
+                    raise ValueError(f'unsafe path in the pack: {k}')
+                os.makedirs(os.path.dirname(to), exist_ok=True)
+                with z.open(i) as s, open(to, 'wb') as d:
+                    shutil.copyfileobj(s, d, 1 << 20)
+                done += i.file_size
+                bar('Unpacking', done / total, f'{done / 1048576:,.0f} of {total / 1048576:,.0f} MB')
+            clear_bar()
+            text = read_text(template).replace('__UUID__', str(uuid.uuid4()))
+            save_text(os.path.join(dest, 'instance.json'), text.replace('__NAME__', name.replace('\\', '\\\\').replace('"', '\\"')))
+        except Exception as e:
+            clear_bar()
+            shutil.rmtree(dest, ignore_errors=True)
+            fail(f'The pack could not be put into ATLauncher: {e}\nNothing was left behind. Check your free space and try again.')
+    say(f'  {len(files)} files into {dest}')
+    ATL_MADE = name
+    return dest
+
+
 def install_fresh(launcher, work):
-    """The whole pack is downloaded, the player imports it (no launcher can be told to from outside), and the instance
-    that appears is then updated and set up like any other."""
+    """The whole pack is downloaded and goes into the launcher as a new instance: written by the updater itself for
+    ATLauncher, handed to the Modrinth app, or imported by the player as a last resort. The instance is then updated
+    and set up like any other."""
     if not FULL_URL:
         fail('A fresh install is not available yet: Lionel has not uploaded the whole pack. Ask him. Nothing was changed.')
     if free_mb(work) < 3500:
@@ -466,11 +538,24 @@ def install_fresh(launcher, work):
     say('\nDownloading the whole pack (about 2.7 GB; this takes a while)...')
     if not (download(FULL_URL, pack, 'The whole pack') and is_zip(pack)):
         fail('The pack could not be downloaded. Check your internet connection and free space, and try again. Nothing was changed.')
+    if launcher == 'ATLauncher':
+        made = install_atl_instance(pack, work)
+        if made:
+            return made
     before = {p for p, k in find_packs() if k == launcher}
     sign_in_steps(launcher)
-    say(f'\nNow import it into {NAMES[launcher]}:', '36')
+    # The Modrinth app imports a pack file it is started with, also when it is already open.
+    exe = next((shutil.which(x) for x in ('modrinth-app', 'ModrinthApp') if shutil.which(x)), None)
+    if launcher == 'Modrinth' and exe and not env('LIONEL_UPDATER_NO_START'):
+        subprocess.Popen([exe, pack], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        say('\nThe Modrinth app is opening the pack. If it asks, click Install, then wait until it has finished installing.', '36')
+        say('  If nothing shows up there, import it yourself:')
+    else:
+        say(f'\nNow import it into {NAMES[launcher]}:', '36')
     if launcher == 'ATLauncher':
-        say('  Its "Import" tab > "Browse", choose the file below, then "Import". Wait until it has finished installing.')
+        # the box above "Browse" takes a pasted path: its slow file window is not needed
+        say('  Instances tab > "Import": paste the file below into the box at the top (not "Browse"), then "Import".')
+        say('  Wait until it has finished installing.')
     elif launcher == 'Modrinth':
         say('  The + (Create new instance) on the left > "From file", choose the file below. Wait until it has installed.')
     else:
@@ -635,6 +720,29 @@ def pack_rule(entry, rule):
     return entry.startswith(rule[:-1]) if rule.endswith('*') else entry == rule
 
 
+POTATO_EARLY = None   # a fresh install's answer, asked before its download (main)
+
+
+def ask_potato(on):
+    """The potato mode question: True (on), False (off), or None when no one answered. Enter keeps `on`."""
+    ram = ram_gb()
+    say('\nPotato mode, for weak PCs: shaders and other visual mods off, the lowest settings (render distance 3,')
+    say('Fast graphics, no particles, no sky, mobs and blocks drawn only close by), smaller textures, 8 GB.')
+    say('You still join the server as normal. Switching it off later puts your own settings back.')
+    say(f"This PC has {ram} GB of RAM. Potato mode is {'ON' if on else 'OFF'}.")
+    answer = env('LIONEL_UPDATER_POTATO') or ask('  Press Enter to keep it, or type Y (on) or N (off) and press Enter: ')
+    if answer is None:
+        return None
+    answer = answer.strip().upper()
+    if answer in ('Y', 'YES', 'ON'):
+        return True
+    if answer in ('N', 'NO', 'OFF'):
+        return False
+    if answer:
+        say(f"  '{answer}' is not Y or N: potato mode stays {'on' if on else 'off'}.", '33')
+    return on
+
+
 def potato_mode(target, src, n):
     """5p. Potato mode: potato.txt's mods off, its resource packs out of / into the list, its settings set; everything
     it replaced written down in lionels-updater-potato.txt and put back when it is switched off (a setting the player
@@ -667,19 +775,11 @@ def potato_mode(target, src, n):
                 rec_now = f[1]
             elif f[0] == 'set' and len(f) >= 6:
                 rec_sets.append(f[1:6])
-    ram = ram_gb()
-    on = was if os.path.isfile(state) else ram < 16
-    say('\nPotato mode, for weak PCs: shaders and other visual mods off, the lowest settings (render distance 3,')
-    say('Fast graphics, no particles, no sky, mobs and blocks drawn only close by), smaller textures, 8 GB.')
-    say('You still join the server as normal. Switching it off later puts your own settings back.')
-    say(f"This PC has {ram} GB of RAM. Potato mode is {'ON' if on else 'OFF'}.")
-    answer = (env('LIONEL_UPDATER_POTATO') or ask('  Press Enter to keep it, or type Y (on) or N (off) and press Enter: ') or '').strip().upper()
-    if answer in ('Y', 'YES', 'ON'):
-        on = True
-    elif answer in ('N', 'NO', 'OFF'):
-        on = False
-    elif answer:
-        say(f"  '{answer}' is not Y or N: potato mode stays {'on' if on else 'off'}.", '33')
+    on = was if os.path.isfile(state) else ram_gb() < 16
+    answer = POTATO_EARLY if POTATO_EARLY is not None else ask_potato(on)
+    if answer is not None:
+        on = answer
+        write_text(os.path.join(STATE, 'potato-decided.txt'), ('on' if on else 'off') + '\n')   # main() reads it
     mods_dir = os.path.join(target, 'mods')
     options = os.path.join(target, 'options.txt')
     if on:
@@ -866,6 +966,7 @@ def read_steps(steps, picture, src):
 
 
 def main():
+    global POTATO_EARLY
     work = None
     try:
         os.makedirs(STATE, exist_ok=True)
@@ -880,12 +981,17 @@ def main():
         potato_pick = False   # potato mode picked: the update runs even when it is the latest (potato_mode() asks)
         if mode not in ('update', 'fresh'):
             say('\nWhat would you like to do?')
-            pick = choose('Type 1, 2 or 3 and press Enter', [
-                f'Update the ATM10 you already have in {NAMES[launcher]}',
-                f'Install the whole pack fresh, as a new {NAMES[launcher]} instance (about 2.7 GB to download)',
-                'Potato mode on or off, for weak PCs (also gets the latest update, if there is one)'], 1)
+            options = [f'Update the ATM10 you already have in {NAMES[launcher]}',
+                       f'Install the whole pack fresh, as a new {NAMES[launcher]} instance (about 2.7 GB to download)']
+            # potato mode only with an ATM10 to put it on: the folder used last time (2026-10-22)
+            if test_pack(first_line(os.path.join(STATE, 'path.txt'))):
+                options.append('Potato mode on or off, for weak PCs (also gets the latest update, if there is one)')
+            pick = choose(f"Type {'1, 2 or 3' if len(options) == 3 else '1 or 2'} and press Enter", options, 1)
             mode = 'fresh' if pick == 2 else 'update'
             potato_pick = pick == 3
+        if mode == 'fresh':
+            # asked before the long download, so the rest runs without questions (2026-10-22)
+            POTATO_EARLY = ask_potato(ram_gb() < 16)
 
         # Where the downloads go: the temporary folder, or the one the player chose last time when that was too full.
         base_file = os.path.join(STATE, 'temp-folder.txt')
@@ -931,6 +1037,8 @@ def main():
                 if latest and in_pack == latest:
                     say(f'\nThe whole pack already has the latest update ({latest}): nothing more to download.')
                     src = None
+            elif latest and have == latest and not potato_pick and not os.path.isfile(os.path.join(STATE, 'potato-decided.txt')):
+                say('\nYou already have the latest update. One new question first: potato mode, for weak PCs.')
             elif latest and have == latest and not potato_pick:
                 answer = ask('\nYou already have the latest update. Press Enter to close, type P and Enter for potato mode on or off, or R to install it again: ')
                 if not answer or answer.strip().lower() not in ('r', 'p'):
@@ -1327,7 +1435,10 @@ def apply(launcher, mode, target, src, manifest=None):
                         else f'Up to date: update {label}'], stderr=subprocess.DEVNULL)
     inst = os.path.dirname(target) if os.path.basename(target) in ('minecraft', '.minecraft') else target
     say('\nWhat to do now:', '36')
-    say(f'  1. In {NAMES[launcher]}, click Play on "{os.path.basename(inst)}".')
+    if ATL_MADE:   # written with ATLauncher closed: the sign-in comes now
+        sign_in_steps(launcher)
+        say('\nThen:')
+    say(f'  1. In {NAMES[launcher]}, click Play on "{ATL_MADE or os.path.basename(inst)}".')
     if not setup_done:
         say('     First set its speed settings: LAUNCH-ARGUMENTS.txt in the ATM10 folder has them.')
     if mode == 'fresh':
