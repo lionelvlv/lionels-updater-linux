@@ -11,7 +11,7 @@
 #   - no update check at each start yet (12b): lionel-check.jar starts the Windows .bat.
 # Test-only switches: the LIONEL_UPDATER_* names of test.ps1 (TARGET, LAUNCHER, MODE, ZIP_URL, VERSION_URL, FULL_URL,
 # JAVA_URL, FILES_URL, MEMORY, OPTIONAL, POTATO, RAM_GB, FREE_MB, NO_DRIVE_SCAN, NO_CLIPBOARD, NO_START, ATL_OPEN, IMPORT_TO).
-import fnmatch, hashlib, json, os, platform, re, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid, zipfile
+import fnmatch, hashlib, json, os, platform, re, shutil, signal, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid, zipfile
 
 MARK = "# Lionel's Additions updater for Linux: the logic."   # the .sh checks a downloaded copy for this line
 DRIVE_ID = '1czcjd-xR4lmtCPN5fUlQ1XYYMoG7Z7Oo'                # the update zip (the .bat's DRIVE_ID)
@@ -223,26 +223,88 @@ def processes():
                 cwd = os.readlink(f'/proc/{pid}/cwd')
             except OSError:
                 cwd = ''
-            yield argv, cwd
+            yield int(pid), argv, cwd
+
+
+def is_launcher(launcher, argv):
+    exe = os.path.basename(argv[0]).lower()
+    if launcher == 'ATLauncher':
+        return exe == 'atlauncher' or any(a.lower().endswith('atlauncher.jar') for a in argv)
+    if launcher == 'Prism':
+        return exe in ('prismlauncher', 'multimc')
+    return exe in ('modrinth-app', 'modrinth app', 'modrinthapp', 'theseus')
 
 
 def launcher_running(launcher):
-    if launcher == 'ATLauncher' and env('LIONEL_UPDATER_ATL_OPEN'):
-        return env('LIONEL_UPDATER_ATL_OPEN') == '1'   # test switch
-    for argv, _ in processes():
-        exe = os.path.basename(argv[0]).lower()
-        if launcher == 'ATLauncher' and (exe == 'atlauncher' or any(a.lower().endswith('atlauncher.jar') for a in argv)):
-            return True
-        if launcher == 'Prism' and exe in ('prismlauncher', 'multimc'):
-            return True
-        if launcher == 'Modrinth' and exe in ('modrinth-app', 'modrinth app', 'modrinthapp', 'theseus'):
-            return True
-    return False
+    if launcher == 'ATLauncher' and env('LIONEL_UPDATER_ATL_OPEN'):   # test switch: 1 open, 0 closed, closable
+        return not REOPEN if env('LIONEL_UPDATER_ATL_OPEN') == 'closable' else env('LIONEL_UPDATER_ATL_OPEN') == '1'
+    return any(is_launcher(launcher, argv) for _, argv, _ in processes())
+
+
+REOPEN = []   # (argv, cwd) of the launcher close_launcher() closed: started again at the end
+
+
+def close_launcher(launcher):
+    """The launcher closed by the updater where it must be (2026-10-22, Lionel: "see if you can close atlauncher
+    automatically ... and relaunch it yourself"): asked to stop (SIGTERM, as closing its window), started again at the
+    end with the command it ran with. Not while a game runs. Did not stop in 15 s: Enter ends it. True when closed."""
+    if not launcher_running(launcher):
+        return True
+    if launcher == 'ATLauncher' and env('LIONEL_UPDATER_ATL_OPEN'):   # tests
+        if env('LIONEL_UPDATER_ATL_OPEN') != 'closable':
+            return False
+        REOPEN.append(([], ''))
+        say(f'\n{NAMES[launcher]} closed: it opens again when the updater is done.')
+        return True
+    procs = list(processes())
+    if any('net.minecraft.client.main' in ' '.join(argv) or 'BootstrapLauncher' in ' '.join(argv) for _, argv, _ in procs):
+        return False
+    mine = [(pid, argv, cwd) for pid, argv, cwd in procs if is_launcher(launcher, argv)]
+    say(f'\nClosing {NAMES[launcher]}: it opens again when the updater is done...')
+    for pid, _, _ in mine:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    for _ in range(30):
+        if not launcher_running(launcher):
+            break
+        time.sleep(0.5)
+    if launcher_running(launcher):
+        say(f'  {NAMES[launcher]} did not close by itself (it may be busy).', '33')
+        if ask('  Press Enter to end it now (or close it yourself first, then press Enter): ') is None:
+            return False
+        for pid, _, _ in mine:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(2)
+    if launcher_running(launcher):
+        return False
+    # ponytail: the first process's own command; a Flatpak one (its files under /app) is started through flatpak instead
+    argv, cwd = mine[0][1], mine[0][2]
+    if argv[0].startswith('/app/'):
+        argv = ['flatpak', 'run', {'ATLauncher': 'com.atlauncher.ATLauncher', 'Prism': 'org.prismlauncher.PrismLauncher'}
+                .get(launcher, 'com.modrinth.ModrinthApp')]
+    REOPEN.append((argv, cwd))
+    return True
+
+
+def reopen_launchers():
+    for argv, cwd in REOPEN:
+        if argv and not env('LIONEL_UPDATER_NO_START'):
+            try:
+                subprocess.Popen(argv, cwd=cwd or None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            except OSError:
+                say('  (Could not start it again: open it yourself.)', '33')
+                continue
+        say('  The launcher is opening again.')
 
 
 def game_running(target):
     real = os.path.realpath(target)
-    for argv, cwd in processes():
+    for _, argv, cwd in processes():
         if not os.path.basename(argv[0]).startswith('java'):
             continue
         if cwd and os.path.realpath(cwd) == real:
@@ -481,7 +543,8 @@ def install_atl_instance(pack, work):
         if index.get('files') or deps.get('minecraft') != t['id'] or deps.get('neoforge') != t['launcher']['loaderVersion']['version']:
             say('\n(This pack is for another Minecraft or NeoForge version than the updater knows, so ATLauncher imports it.)', '33')
             return ''
-        # ATLauncher reads its instances when it starts: closed, it sees the new one next start.
+        # ATLauncher reads its instances when it starts: closed (by the updater), it sees the new one next start.
+        close_launcher('ATLauncher')
         for _ in range(3):
             if not launcher_running('ATLauncher'):
                 break
@@ -817,6 +880,25 @@ def potato_mode(target, src, n):
                            + (f"; on: {', '.join(new)}" if new else ''))
                 rec_now = inside
         changed = {}
+        # potato.txt changed since a setting was recorded (2026-10-22: 60 fps to unlimited, the sky back on): where the
+        # file still has the value potato mode wrote, the new rule's value goes in, or the player's own when it is gone.
+        keep_sets = []
+        for rel, sec, key, old, new in rec_sets:
+            rule = next((s for s in sets if s[0] == rel and s[2] == sec and s[3] == key), None)
+            if rule and rule[4] == new:
+                keep_sets.append([rel, sec, key, old, new])
+                continue
+            to = rule[4] if rule else old
+            path = os.path.join(target, rel)
+            if os.path.isfile(path):
+                text = read_text(path)
+                m = find_setting(text, kind_of(rel), sec, key)
+                if m and m.group(1) == new and to != new:
+                    save_text(path, text[:m.start(1)] + to + text[m.end(1):])
+                    changed[rel] = changed.get(rel, 0) + 1
+            if rule:
+                keep_sets.append([rel, sec, key, old, rule[4]])
+        rec_sets = keep_sets
         for rel, kind, sec, key, value in sets:
             path = os.path.join(target, rel)
             if not os.path.isfile(path) or any(r[0] == rel and r[1] == sec and r[2] == key for r in rec_sets):
@@ -1435,6 +1517,7 @@ def apply(launcher, mode, target, src, manifest=None):
                         else f'Up to date: update {label}'], stderr=subprocess.DEVNULL)
     inst = os.path.dirname(target) if os.path.basename(target) in ('minecraft', '.minecraft') else target
     say('\nWhat to do now:', '36')
+    reopen_launchers()
     if ATL_MADE:   # written with ATLauncher closed: the sign-in comes now
         sign_in_steps(launcher)
         say('\nThen:')
@@ -1556,6 +1639,8 @@ less politely. To go back: turn the custom settings off; the launcher uses its o
     last_key = first_line(arg_seen)
 
     def closed(name):
+        if close_launcher(launcher):
+            return True
         for _ in range(3):
             if not launcher_running(launcher):
                 return True
@@ -1573,20 +1658,29 @@ less politely. To go back: turn the custom settings off; the launcher uses its o
         atl = os.path.join(target, 'instance.json')
         if not os.path.isfile(atl):
             say('\nThis folder has no instance.json, so it is not an ATLauncher instance: set up the speed settings by hand (LAUNCH-ARGUMENTS.txt in it).', '33')
-        elif closed('ATLauncher'):
+        else:
+            def make(text):
+                new = set_json_key(text, 'javaArguments', json_text(arg_rest))
+                new = set_json_key(new, 'maximumMemory', str(mem_mb))
+                if have_java:
+                    new = set_json_key(new, 'javaPath', json_text(java_home))
+                    new = set_json_key(new, 'useJavaProvidedByMinecraft', 'false')
+                return new
+            # ATLauncher closed (by the updater) only when the settings differ (2026-10-22)
             text = read_text(atl)
-            new = set_json_key(text, 'javaArguments', json_text(arg_rest))
-            new = set_json_key(new, 'maximumMemory', str(mem_mb))
-            if have_java:
-                new = set_json_key(new, 'javaPath', json_text(java_home))
-                new = set_json_key(new, 'useJavaProvidedByMinecraft', 'false')
+            new = make(text)
+            done = True
+            if new != text and closed('ATLauncher'):
+                text = read_text(atl)   # again: it may have saved it as it closed
+                new = make(text)
+            elif new != text:
+                new, done = text, False   # it stayed open: closed() said so
             if new != text:
                 if not os.path.exists(atl + '.bak-lionel'):
                     shutil.copy2(atl, atl + '.bak-lionel')
                 save_text(atl, new)
                 say("\nNEW LAUNCH ARGUMENTS written into ATLauncher's settings for this instance:", '36')
                 say(f"  memory {mem_mb} MB; {f'Java 21.0.12.1 ({java_home}); ' if have_java else ''}Java arguments: {arg_rest}")
-            done = True
     elif launcher == 'Prism':
         cfg = os.path.join(os.path.dirname(target), 'instance.cfg')
         if not os.path.isfile(cfg):

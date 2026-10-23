@@ -158,6 +158,15 @@ write(os.path.join(home, '.config/lionels-updater/potato-decided.txt'), 'off\n')
 rc, out = run('1\n\n\n')
 check('already latest is noticed\n' + out, rc == 0 and 'You already have the latest update' in out and 'Downloading the latest' not in out)
 
+# 2b. ATLauncher open (2026-10-22): settings already right, left alone; changed, closed by the updater, written, reopened
+rc, out = run('\nr\n' + '\n' * 8, {'LIONEL_UPDATER_LAUNCHER': 'ATLauncher', 'LIONEL_UPDATER_MODE': 'update', 'LIONEL_UPDATER_ATL_OPEN': '1'})
+check('ATLauncher open, settings right: not closed, nothing asked\n' + out, rc == 0 and 'Done.' in out and 'Close it completely' not in out
+      and 'stayed open' not in out)
+write(f'{atl}/instance.json', read(f'{atl}/instance.json').replace('"maximumMemory": 16384', '"maximumMemory": 4096'))
+rc, out = run('\nr\n' + '\n' * 8, {'LIONEL_UPDATER_LAUNCHER': 'ATLauncher', 'LIONEL_UPDATER_MODE': 'update', 'LIONEL_UPDATER_ATL_OPEN': 'closable'})
+check('ATLauncher open, settings changed: closed, written, reopened\n' + out, rc == 0 and 'closed: it opens again' in out
+      and 'opening again' in out and '"maximumMemory": 16384' in read(f'{atl}/instance.json'))
+
 # 3. A newer update without gone-later.jar: removed through the installed list; optional mod switched off
 files2 = dict(BASE)
 del files2['overwrite/mods/gone-later.jar']
@@ -225,6 +234,15 @@ check('potato on: Chloride, each entities key in its own section', read(f'{atl}/
       .replace('entities = false\n  entityLimit = 60', 'entities = true\n  entityLimit = 25'))
 check('potato on: optional mod off, choice kept, 8 GB', os.path.isfile(f'{atl}/mods/ShoulderSurfing-new.jar.disabled')
       and read(f'{atl}/lionels-updater-optional.txt') == 'shouldersurfing=off\n' and '-Xmx8G' in read(f'{atl}/LAUNCH-ARGUMENTS.txt'))
+# potato.txt changed after it was applied (2026-10-22): a value potato mode wrote follows the new rule, a rule gone puts
+# the player's own back (gamma here, as the sky)
+rec = read(f'{atl}/lionels-updater-potato.txt')
+write(f'{atl}/lionels-updater-potato.txt', rec.replace('graphicsMode\t1\t0', 'graphicsMode\t1\t5') + 'set\toptions.txt\t-\tgamma\t0.5\t1.0\n')
+write(f'{atl}/options.txt', o.replace('graphicsMode:0', 'graphicsMode:5') + 'gamma:1.0\r\n')
+rc, out = run('\n\n\n\n', po_env, args=[potato_zip])
+rec = read(f'{atl}/lionels-updater-potato.txt')
+check('potato rules changed since: new value where potato\'s was, a dropped rule\'s setting back\n' + out, rc == 0
+      and read(f'{atl}/options.txt') == o + 'gamma:0.5\r\n' and 'graphicsMode\t1\t0' in rec and 'gamma' not in rec)
 write(f'{atl}/options.txt', o.replace('renderDistance:3', 'renderDistance:6'))   # the player's own change meanwhile
 po_env['LIONEL_UPDATER_POTATO'] = 'N'
 rc, out = run('\n\n\n\n', po_env, args=[potato_zip])
