@@ -1335,8 +1335,8 @@ def apply(launcher, mode, target, src, manifest=None):
                 on[m['id']] = m['default']
         own = dict(on)   # potato mode (5p): all off for this run, the player's own choices kept for when it is off
         if POTATO:
-            on = {k: False for k in on}
-            say('\nOptional mods: all off while potato mode is on.')
+            on = {k: k == 'distanthorizons' for k in on}   # DH stays, low-spec with its renderer off (potato.txt; 2026-10-23, Lionel)
+            say('\nOptional mods: all off while potato mode is on, but Distant Horizons (low-spec, its renderer off until you turn it on).')
         while not POTATO:
             say('\nOptional mods (only on this PC; the server does not need them):')
             for k, m in enumerate(optional, 1):
