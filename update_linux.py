@@ -1479,6 +1479,13 @@ def apply(launcher, mode, target, src, manifest=None):
     edit_once(target, 'config/almostunified/placeholders.json', [
         (r'(?m)^([ \t]*)"tin",(?=\r?\n)(?![\s\S]*"titanium")', '"tin",\n    "titanium",')],
         'Almost Unified merges the two titaniums (one line)')
+    # 11i, 11j (2026-10-22, spark U5YedLQBz5; update.ps1 has the why): Spore's scent particles, Ars Nouveau's skyweave pass
+    edit_once(target, 'config/spore-startup.toml', [
+        (r'(?m)^([ \t]*"Should Scents have particles\?" = )true(?=\r?$)', 'false')],
+        "Spore's scent clouds no longer spawn particles (about a tenth of the frame in the Lost City; one line)")
+    edit_once(target, 'config/ars_nouveau-client.toml', [
+        (r'(?m)^([ \t]*disable_skyweave = )false(?=\r?$)', 'true')],
+        "Ars Nouveau's skyweave sky pass is off (it drew the sky twice; one line)")
 
     # 11c. lionel-turbo switches the player's file does not mention at all are appended with their comment line.
     turbo_rel = 'config/lionel-turbo.properties'
